@@ -2,6 +2,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 import requests
+from django.conf import settings
 import json
 from datetime import datetime, timedelta
 import math
@@ -42,8 +43,8 @@ def eld_trip_planner(request):
                 'error': 'Missing required fields: pickup_location, dropoff_location'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Google Maps API configuration (you'll need to add your API key)
-        GOOGLE_MAPS_API_KEY = "AIzaSyCG9oaQ7ryRmAguCJrwDR4ITvvdJ-G7vUY"  # Replace with actual key
+        # Google Maps API configuration
+        GOOGLE_MAPS_API_KEY = settings.GOOGLE_MAPS_API_KEY
         directions_url = "https://maps.googleapis.com/maps/api/directions/json"
         
         # Get route data from Google Maps
