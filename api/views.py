@@ -67,20 +67,21 @@ def eld_trip_planner(request):
         polyline = route_data['polyline']
         route_steps = route_data['steps']
         
-        # Generate ELD logs with HOS compliance
-        eld_data = generate_eld_logs(
-            total_distance, 
-            total_duration, 
-            current_cycle_used,
-            pickup_location,
-            dropoff_location
-        )
-        
         # Generate driver info and form data
         driver_data = generate_driver_data(pickup_location, dropoff_location)
         
         # Generate stops and markers for map
-        stops_data = generate_stops_data(route_steps, pickup_location, dropoff_location, route_data)
+        stops_data = generate_stops_data(route_steps, pickup_location, dropoff_location, route_data, total_duration)
+        
+        # Generate ELD logs with fuel stops
+        eld_data = generate_eld_logs_with_fuel_stops(
+            total_distance, 
+            total_duration, 
+            current_cycle_used,
+            pickup_location,
+            dropoff_location,
+            stops_data['markers']
+        )
         
         # Check compliance
         compliance_status = check_compliance(eld_data, current_cycle_used, total_duration)
@@ -332,6 +333,191 @@ def generate_eld_logs(total_distance, total_duration, cycle_used, pickup_loc, dr
     }
 
 
+def generate_eld_logs_with_fuel_stops(total_distance, total_duration, cycle_used, pickup_loc, dropoff_loc, markers):
+    """Generate ELD logs with fuel stops every 1000 miles and complete 24-hour daily logs"""
+    
+    # HOS Rules
+    MAX_DRIVING_PER_DAY = 11
+    BREAK_REQUIRED_AFTER = 7.5  # hours of driving
+    BREAK_DURATION = 0.5
+    FUEL_DURATION = 0.5
+    PICKUP_DURATION = 0.5
+    DROPOFF_DURATION = 0.5
+    REST_DURATION = 10
+    
+    # Extract fuel stops from markers
+    fuel_stops = [marker for marker in markers if marker['type'] == 'fuel']
+    
+    # Generate daily logs with complete 24-hour periods
+    daily_logs = []
+    duty_events = []
+    
+    # Calculate how many days we need based on driving time
+    days_needed = max(1, math.ceil(total_duration / MAX_DRIVING_PER_DAY))
+    
+    # Distribute driving time across days
+    remaining_driving = total_duration
+    fuel_stop_index = 0
+    
+    # Generate each day with complete 24-hour timeline (00:00 to 24:00)
+    for day in range(1, days_needed + 1):
+        day_events = []
+        
+        # Day 1: Start with OFF duty (00:00-06:00)
+        if day == 1:
+            day_events.append({
+                'start': '00:00',
+                'end': '06:00',
+                'status': 'OFF',
+                'label': 'Off duty - start of day'
+            })
+        
+        # Day 2+: Start with SB (00:00-06:00) - continuation from previous night
+        else:
+            day_events.append({
+                'start': '00:00',
+                'end': '06:00',
+                'status': 'SB',
+                'label': 'Sleep'
+            })
+        
+        # Pre-trip inspection (06:00-06:30)
+        if day == 1:
+            day_events.append({
+                'start': '06:00',
+                'end': '06:30',
+                'status': 'ON',
+                'label': f'Pre-trip inspection & Pickup at {pickup_loc}'
+            })
+        else:
+            day_events.append({
+                'start': '06:00',
+                'end': '06:30',
+                'status': 'ON',
+                'label': 'Pre-trip inspection'
+            })
+        
+        # Calculate driving time for this day (max 11 hours)
+        day_driving = min(MAX_DRIVING_PER_DAY, remaining_driving)
+        
+        # Morning driving session (06:30-14:00)
+        morning_drive = min(7.5, day_driving)
+        if morning_drive > 0:
+            day_events.append({
+                'start': '06:30',
+                'end': '14:00',
+                'status': 'DRIVING',
+                'label': 'Drive' if day == 1 else 'Continue driving'
+            })
+            remaining_driving -= morning_drive
+        
+        # Break if drove 7.5+ hours (14:00-14:30)
+        if morning_drive >= BREAK_REQUIRED_AFTER:
+            day_events.append({
+                'start': '14:00',
+                'end': '14:30',
+                'status': 'OFF',
+                'label': 'Break'
+            })
+        
+        # Afternoon driving session (14:30-18:00)
+        afternoon_drive = min(day_driving - morning_drive, remaining_driving)
+        if afternoon_drive > 0:
+            day_events.append({
+                'start': '14:30',
+                'end': '18:00',
+                'status': 'DRIVING',
+                'label': 'Continue driving'
+            })
+            remaining_driving -= afternoon_drive
+        
+        # Handle end of day based on whether it's the last day
+        if day == days_needed:  # Last day
+            # Add fuel stops if they occur on the last day
+            if fuel_stop_index < len(fuel_stops) and day > 1:
+                day_events.append({
+                    'start': '18:00',
+                    'end': '18:30',
+                    'status': 'ON',
+                    'label': f'Fueling - {fuel_stops[fuel_stop_index]["label"]}'
+                })
+                fuel_stop_index += 1
+                
+                # Dropoff after fueling
+                day_events.append({
+                    'start': '18:30',
+                    'end': '19:00',
+                    'status': 'ON',
+                    'label': f'Dropoff at {dropoff_loc}'
+                })
+                
+                # Fill remaining time with OFF duty (19:00-24:00)
+                day_events.append({
+                    'start': '19:00',
+                    'end': '24:00',
+                    'status': 'OFF',
+                    'label': 'Off duty - end of trip'
+                })
+            else:
+                # Dropoff without fueling
+                day_events.append({
+                    'start': '18:00',
+                    'end': '18:30',
+                    'status': 'ON',
+                    'label': f'Dropoff at {dropoff_loc}'
+                })
+                
+                # Fill remaining time with OFF duty (18:30-24:00)
+                day_events.append({
+                    'start': '18:30',
+                    'end': '24:00',
+                    'status': 'OFF',
+                    'label': 'Off duty - end of trip'
+                })
+        else:  # Not the last day
+            # Add fuel stops if they occur on this day
+            if fuel_stop_index < len(fuel_stops) and day > 1:
+                day_events.append({
+                    'start': '18:00',
+                    'end': '18:30',
+                    'status': 'ON',
+                    'label': f'Fueling - {fuel_stops[fuel_stop_index]["label"]}'
+                })
+                fuel_stop_index += 1
+                
+                # Sleep for the night (18:30-24:00)
+                day_events.append({
+                    'start': '18:30',
+                    'end': '24:00',
+                    'status': 'SB',
+                    'label': 'Sleep'
+                })
+            else:
+                # Sleep for the night (18:00-24:00)
+                day_events.append({
+                    'start': '18:00',
+                    'end': '24:00',
+                    'status': 'SB',
+                    'label': 'Sleep'
+                })
+        
+        # Add day to logs
+        daily_logs.append({
+            'day': day,
+            'events': day_events
+        })
+    
+    # Add all events to duty_events
+    for day_log in daily_logs:
+        duty_events.extend(day_log['events'])
+    
+    return {
+        'daily_logs': daily_logs,
+        'duty_events': duty_events,
+        'days_required': len(daily_logs)
+    }
+
+
 def generate_driver_data(pickup_loc, dropoff_loc):
     """Generate driver info and form data"""
     return {
@@ -348,10 +534,14 @@ def generate_driver_data(pickup_loc, dropoff_loc):
     }
 
 
-def generate_stops_data(route_steps, pickup_loc, dropoff_loc, route_data=None):
+def generate_stops_data(route_steps, pickup_loc, dropoff_loc, route_data=None, total_duration=None):
     """Generate stops and markers for map display using real coordinates"""
     stops = []
     markers = []
+    
+    # Fallback for total_duration if not provided
+    if total_duration is None:
+        total_duration = route_data['total_duration_hours'] if route_data else 24
     
     # Extract real coordinates from Google Maps response
     if route_data and 'legs' in route_data:
@@ -373,26 +563,76 @@ def generate_stops_data(route_steps, pickup_loc, dropoff_loc, route_data=None):
             'label': dropoff_loc
         })
         
-        # Calculate fuel stop location (middle of route)
-        if len(route_steps) > 10:  # Long trip needs fuel
-            mid_point = len(route_steps) // 2
-            fuel_coords = route_steps[mid_point]['end_location']
+        # Calculate fuel stops every 1000 miles
+        total_distance = route_data['total_distance_miles']
+        
+        # Generate fuel stop distances (1000, 2000, 3000, etc.)
+        fuel_stop_miles = []
+        current_mile = 1000
+        while current_mile < total_distance:
+            fuel_stop_miles.append(current_mile)
+            current_mile += 1000
+        
+        # Find fuel stop locations using percentage-based approach
+        for fuel_mile in fuel_stop_miles:
+            # Calculate the percentage of total distance for this fuel stop
+            fuel_percentage = fuel_mile / total_distance
+            
+            # Find the route step that corresponds to this percentage
+            target_step_index = int(fuel_percentage * len(route_steps))
+            
+            # Ensure we don't go beyond the route steps
+            target_step_index = min(target_step_index, len(route_steps) - 1)
+            
+            # Get the coordinates for this fuel stop
+            fuel_coords = route_steps[target_step_index]['end_location']
             markers.append({
                 'lat': fuel_coords['lat'],
                 'lng': fuel_coords['lng'],
                 'type': 'fuel',
-                'label': 'Fuel Stop'
+                'label': f'Fuel Stop - {fuel_mile}mi'
             })
         
-        # Calculate rest stop location (1/3 through route)
-        rest_point = len(route_steps) // 3
-        rest_coords = route_steps[rest_point]['end_location']
-        markers.append({
-            'lat': rest_coords['lat'],
-            'lng': rest_coords['lng'],
-            'type': 'rest',
-            'label': 'Rest Stop'
-        })
+        # Calculate days needed and driving distance per day
+        MAX_DRIVING_PER_DAY = 11
+        days_needed = max(1, math.ceil(total_duration / MAX_DRIVING_PER_DAY))
+        driving_distance_per_day = total_distance / days_needed
+        
+        # Add rest stops (where driver switches to SB - end of each driving day except last)
+        for day in range(1, days_needed):  # Exclude last day
+            target_distance = day * driving_distance_per_day
+            rest_percentage = target_distance / total_distance
+            
+            # Find the route step that corresponds to this percentage
+            target_step_index = int(rest_percentage * len(route_steps))
+            target_step_index = min(target_step_index, len(route_steps) - 1)
+            
+            rest_coords = route_steps[target_step_index]['end_location']
+            markers.append({
+                'lat': rest_coords['lat'],
+                'lng': rest_coords['lng'],
+                'type': 'rest',
+                'label': f'Rest Stop - Day {day}'
+            })
+        
+        # Add break stops (where driver switches to OFF - 14:00-14:30 breaks)
+        # These occur at approximately 7.5 hours of driving within each day
+        for day in range(1, days_needed + 1):
+            # Break occurs at 7.5 hours of driving (half of 11 hours max)
+            break_distance = (day - 1) * driving_distance_per_day + (driving_distance_per_day * 0.68)  # ~7.5/11 ratio
+            break_percentage = break_distance / total_distance
+            
+            # Find the route step that corresponds to this percentage
+            target_step_index = int(break_percentage * len(route_steps))
+            target_step_index = min(target_step_index, len(route_steps) - 1)
+            
+            break_coords = route_steps[target_step_index]['end_location']
+            markers.append({
+                'lat': break_coords['lat'],
+                'lng': break_coords['lng'],
+                'type': 'break',
+                'label': f'Break Stop - Day {day}'
+            })
         
     else:
         # Fallback to hardcoded coordinates if no route data

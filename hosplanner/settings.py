@@ -30,7 +30,16 @@ SECRET_KEY = 'django-insecure-3ksp#razwu%6nl74t=buzi67hscqf_30_puknix0l$n)lx=h%o
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    'backend-hos-47oo.onrender.com',  # Your Render domain
+    '.onrender.com',  # Allow all Render subdomains
+]
+
+# Add environment variable support
+if os.getenv('ALLOWED_HOSTS'):
+    ALLOWED_HOSTS.extend(os.getenv('ALLOWED_HOSTS').split(','))
 
 
 # Application definition
